@@ -1067,3 +1067,8 @@ schools:
     name: "浙江树人学院"
     initial: "Z"
     resource_folder: "ZJSRU"
+
+  - id: "JSEI"
+    name: "江苏电子信息职业学院"
+    initial: "J"
+    resource_folder: "JSEI"
