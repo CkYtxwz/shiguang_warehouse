@@ -1082,3 +1082,14 @@ schools:
     name: "河南城建学院"
     initial: "H"
     resource_folder: "HUUC"
+
+  - id: "NANKAI"
+    name: "南开大学"
+    initial: "N"
+    resource_folder: "NANKAI"
+    
+  - id: "DLUT"
+    name: "大连理工大学"
+    initial: "D"
+    resource_folder: "DLUT"    
+    
