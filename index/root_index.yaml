@@ -1072,3 +1072,8 @@ schools:
     name: "江苏电子信息职业学院"
     initial: "J"
     resource_folder: "JSEI"
+
+  - id: "JUST"
+    name: "江苏科技大学"
+    initial: "J"
+    resource_folder: "JUST"
