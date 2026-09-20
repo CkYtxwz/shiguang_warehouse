@@ -11,6 +11,8 @@ npm test --prefix tests/xjnu
 
 ## 在拾光中测试
 
+已发布版本可从自定义仓库的 `main` 分支更新，在学校列表中直接选择“新疆师范大学”，步骤见 [安装与导入](../../resources/XJNU/README.md#安装与导入)。下面的测试入口用于尚未发布索引的开发版本。
+
 1. 在“更多”页开启开发者功能。不同版本按钮位置可能略有变化，2.x 通常为点击图标五次。
 2. “我的 → 更多 → 更新教务适配仓库”，选择自定义仓库。
 3. 仓库填写 `https://github.com/CkYtxwz/shiguang_warehouse.git`，分支填写 `test/xjnu`。
