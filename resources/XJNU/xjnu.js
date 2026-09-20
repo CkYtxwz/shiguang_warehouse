@@ -1,14 +1,103 @@
 // 新疆师范大学本科教务适配 — CkYtxwz
 // 使用用户已登录的同源会话，不保存账号、密码或 Cookie。
-// 首版按节次导入并提示教学周历，保留目标课表已有的作息和配置。
+// 2025 年春季起的官方作息支持按楼宇错峰；教学周历仍提示手动核对。
 (function (root) {
     "use strict";
 
     const ORIGIN = "https://jwxt.xjnu.edu.cn";
     const TIMETABLE_PATH = "/jsxsd/xskb/xskb_list.do";
     const CALENDAR_PATH = "/jsxsd/jxzl/jxzl_query";
+    // 学校办公室 2025-01-10《 关于调整上课时间表的通知 》及 PDF 附件：
+    // http://db.xjnu.edu.cn/info/1201/2382.htm
+    // 官网校历交叉核对：https://www.xjnu.edu.cn/info/1080/38891.htm
+    // 时间照录官方表，不做北京时间/新疆时间的两小时换算，不推算 11、12 节。
+    const TIME_PROFILES = [
+        { id: "wq-other", label: "温泉：1号教学楼及其他楼宇", morning: ["10:00-10:45", "10:50-11:35", "12:00-12:45", "12:50-13:35"] },
+        { id: "wq-2", label: "温泉：2号教学楼", morning: ["10:00-10:45", "10:50-11:35", "11:50-12:35", "12:40-13:25"] },
+        { id: "wq-3", label: "温泉：3号教学楼", morning: ["10:00-10:45", "10:50-11:35", "12:10-12:55", "13:00-13:45"] },
+        { id: "kl-wenshi", label: "昆仑：文史楼", morning: ["10:00-10:45", "10:55-11:40", "12:00-12:45", "12:55-13:40"] },
+        { id: "kl-other", label: "昆仑：其他楼宇", morning: ["10:00-10:45", "10:55-11:40", "12:10-12:55", "13:05-13:50"] }
+    ];
+    const COMMON_AFTERNOON = ["15:30-16:15", "16:25-17:10", "17:30-18:15", "18:25-19:10", "20:00-20:45", "20:55-21:40"];
     const text = node => (node?.textContent || "").replace(/\s+/g, " ").trim();
     const cells = row => Array.from(row.children).filter(el => /^(TD|TH)$/.test(el.tagName));
+
+    function timeSlots(profileId) {
+        const profile = TIME_PROFILES.find(item => item.id === profileId);
+        if (!profile) throw new Error("未能识别学校作息方案。");
+        return [...profile.morning, ...COMMON_AFTERNOON].map((range, index) => {
+            const [startTime, endTime] = range.split("-");
+            return { number: index + 1, startTime, endTime };
+        });
+    }
+
+    function courseTimes(course, profileId) {
+        const slots = timeSlots(profileId);
+        if (!slots[course.startSection - 1] || !slots[course.endSection - 1]) throw new Error("官方作息仅公布了第 1—10 节。");
+        return { start: slots[course.startSection - 1].startTime, end: slots[course.endSection - 1].endTime };
+    }
+
+    function buildingKey(position) {
+        const value = position.replace(/\s/g, "");
+        return value.match(/^.*?(?:楼|体育馆|运动场|操场)/)?.[0] || value || "未注明教室";
+    }
+
+    function exactTimeProfile(position) {
+        const value = buildingKey(position);
+        // 仅识别官方表中明确的名称；不凭楼号或楼名猜测校区、别名。
+        if (/^温泉(?:校区)?[（(]?2号教学楼$/.test(value)) return "wq-2";
+        if (/^温泉(?:校区)?[（(]?3号教学楼$/.test(value)) return "wq-3";
+        if (/^温泉(?:校区)?[（(]?1号教学楼$/.test(value)) return "wq-other";
+        if (/^(?:昆仑(?:校区)?[（(]?)?文史楼$/.test(value)) return "kl-wenshi";
+        return null;
+    }
+
+    async function prepareTiming(api, courses, semester) {
+        const preserve = reason => ({ courses, slots: null, description: reason + "按节次导入，保留目标课表已有作息时间。" });
+        const [year, , term] = semester.split("-").map(Number);
+        if (year < 2024 || (year === 2024 && term === 1)) return preserve("该学期早于官方 2025 年春季作息的实施时间。\n");
+        if (courses.some(course => course.endSection > 10)) return preserve("课表含第 10 节以后的课程，官方作息未公布对应时间，无法完整校准。\n");
+        const options = TIME_PROFILES.map(profile => ({ value: profile.id, label: profile.label + "（第3节 " + profile.morning[2].split("-")[0] + "）" }));
+        const base = await choose(api, "选择课表默认作息（2025年春季起）", [...options, { value: "keep", label: "保留目标课表现有作息" }]);
+        if (base === null) return null;
+        if (base === "keep") return preserve("");
+        if (typeof api.savePresetTimeSlots !== "function") throw new Error("当前拾光版本不支持导入作息，请更新后重试。");
+        const assignments = new Map();
+        const converted = [];
+        let customCount = 0;
+        for (const course of courses) {
+            const defaultTimes = courseTimes(course, base);
+            // 第一节单节以及下午、晚间等在全部方案中相同，无需追问楼宇。
+            const differs = TIME_PROFILES.some(profile => JSON.stringify(courseTimes(course, profile.id)) !== JSON.stringify(defaultTimes));
+            let profileId = base;
+            if (differs) {
+                const key = buildingKey(course.position);
+                profileId = assignments.get(key) || exactTimeProfile(course.position);
+                if (!profileId) {
+                    profileId = await choose(api, "确认“" + key + "”的上课作息", options.map(option => ({ ...option, selected: option.value === base })));
+                    if (profileId === null) return null;
+                }
+                assignments.set(key, profileId);
+            }
+            const actual = courseTimes(course, profileId);
+            const result = { ...course };
+            if (actual.start !== defaultTimes.start || actual.end !== defaultTimes.end) {
+                // 保留原节次，另给错峰课程设置精确时间，避免一套默认作息误改跨楼课程。
+                result.isCustomTime = true;
+                result.customStartTime = actual.start;
+                result.customEndTime = actual.end;
+                customCount++;
+            }
+            converted.push(result);
+        }
+        const profile = TIME_PROFILES.find(item => item.id === base);
+        const slots = timeSlots(base);
+        const lines = ["采用学校 2025 年春季起作息：" + profile.label + "。将更新目标课表的第 1—10 节时间。",
+            slots.map(slot => slot.number + "节 " + slot.startTime + "—" + slot.endTime).join("\n")];
+        if (assignments.size) lines.push("楼宇对应：\n" + Array.from(assignments, ([key, id]) => key + " → " + TIME_PROFILES.find(item => item.id === id).label).join("\n"));
+        if (customCount) lines.push(customCount + " 条错峰安排将使用独立起止时间，原节次保留。");
+        return { courses: converted, slots, description: lines.join("\n\n") };
+    }
 
     function numberList(value, maximum) {
         const expression = value.replace(/[，、]/g, ",").replace(/[－—–~～至]/g, "-").replace(/\s/g, "");
@@ -252,20 +341,30 @@
             config = null;
             calendarWarning = "未取得匹配的教学周历，导入后请手动核对开学日期和总周数。";
         }
+        const timing = await prepareTiming(api, parsed.courses, semester);
+        if (timing === null) return { status: "cancelled" };
         const count = new Set(parsed.courses.map(course => course.name)).size;
         const summary = [semester + "：" + count + " 门课程，" + parsed.courses.length + " 条上课安排。",
-            "按节次导入，保留目标课表已有作息时间。"];
+            timing.description];
         if (config) summary.push("教学周历：第一周从 " + config.semesterStartDate + " 开始，共 " + config.semesterTotalWeeks + " 周。请在目标课表设置中核对。");
         if (calendarWarning) summary.push(calendarWarning);
         if (parsed.unscheduled.length) summary.push("教务的“无课表课程”列表中还有以下记录；未排定的安排不导入，已排定的安排仍正常导入：\n" + parsed.unscheduled.join("、"));
-        const confirmed = await api.showAlert("核对导入内容", summary.join("\n\n"), "导入课程");
+        const confirmed = await api.showAlert("核对导入内容", summary.join("\n\n"), timing.slots ? "导入课程和作息" : "导入课程");
         if (!confirmed) return { status: "cancelled" };
-        if (await api.saveImportedCourses(JSON.stringify(parsed.courses)) !== true) {
+        if (await api.saveImportedCourses(JSON.stringify(timing.courses)) !== true) {
             throw new Error("课程未保存，导入已取消或失败。");
         }
+        if (timing.slots) {
+            try {
+                if (await api.savePresetTimeSlots(JSON.stringify(timing.slots)) !== true) throw new Error("作息保存失败");
+            } catch (error) {
+                throw new Error("课程已保存，但学校作息未能写入。请重新执行导入或在课表设置中手动修改时间；不要沿用未校准的时间提醒。");
+            }
+        }
         // App 的 saveCourseConfig 会把省略的课时长度重置为默认值，且桥接层没有读取配置接口。
-        // 不调用它，也不调用 savePresetTimeSlots，确保完整保留用户现有的作息配置。
-        await api.showAlert("导入完成", "已导入 " + count + " 门课程，" + parsed.courses.length + " 条上课安排。请核对目标课表已有作息时间。" +
+        // 仅提交精确节次时间，不覆盖学期、默认时长及其他课表配置。
+        await api.showAlert("导入完成", "已导入 " + count + " 门课程，" + parsed.courses.length + " 条上课安排。" +
+            (timing.slots ? "已更新学校第 1—10 节作息，错峰课程请在课程详情中核对起止时间。" : timing.description) +
             (config ? "\n\n教学周历：第一周开始日期 " + config.semesterStartDate + "，共 " + config.semesterTotalWeeks + " 周。请在课表设置中核对；本次未修改这些设置。" : "") +
             (calendarWarning ? "\n\n" + calendarWarning : ""), "完成");
         bridge.sync?.notifyTaskCompletion?.();
@@ -274,7 +373,7 @@
 
     // Node 单元测试只加载纯解析函数，不访问网络或触发 App 导入。
     if (typeof module !== "undefined" && module.exports) {
-        module.exports = { numberList, parseSchedule, parseTimetable, parseCalendar, selectOptions, runImportFlow };
+        module.exports = { numberList, parseSchedule, parseTimetable, parseCalendar, selectOptions, timeSlots, prepareTiming, runImportFlow };
         return;
     }
     runImportFlow(root).catch(async error => {

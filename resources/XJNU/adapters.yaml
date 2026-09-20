@@ -6,4 +6,4 @@ adapters:
     asset_js_path: "xjnu.js"
     import_url: "https://jwxt.xjnu.edu.cn/jsxsd/"
     maintainer: "CkYtxwz"
-    description: "登录教务系统后执行导入，从学期理论课表读取个人课程。按节次导入，保留目标课表已有作息和配置；提示教学周历日期、周数及尚未排课的课程。"
+    description: "登录后导入个人学期理论课表。支持2025年春季起的官方作息，按校区和楼宇处理错峰时间，也可保留已有作息；提示教学周历和未排课记录。"

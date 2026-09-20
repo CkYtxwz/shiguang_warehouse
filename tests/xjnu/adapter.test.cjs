@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const { JSDOM } = require("jsdom");
-const { parseSchedule, parseTimetable, parseCalendar, runImportFlow } = require("../../resources/XJNU/xjnu.js");
+const { parseSchedule, parseTimetable, parseCalendar, timeSlots, prepareTiming, runImportFlow } = require("../../resources/XJNU/xjnu.js");
 
 const semester = "2026-2027-1";
 const semesterSelect = value => `<select id="xnxq01id"><option value="${value}" selected>${value}</option></select>`;
@@ -91,16 +91,16 @@ test("calendar uses the selected semester, actual Monday, and real week count", 
     assert.throws(() => parseCalendar(parse(calendar().replace("2026年08月31", "2026年09月01")), semester), /日期/);
 });
 
-function environment({ choose = 0, confirmed = true, saveResult = true, saveThrows = false, calendarFails = false, wrongSemester = false, oldBridge = false } = {}) {
+function environment({ choose = 0, confirmed = true, saveResult = true, saveThrows = false, timeResult = true, timeThrows = false, calendarFails = false, wrongSemester = false, oldBridge = false } = {}) {
     const dom = new JSDOM("", { url: "https://jwxt.xjnu.edu.cn/jsxsd/framework/xsMain.htmlx" });
-    const calls = { requests: [], alerts: [], courses: [], configs: [], completed: 0, times: 0 };
+    const calls = { requests: [], alerts: [], selections: [], courses: [], configs: [], slots: [], completed: 0, times: 0 };
     const env = { location: dom.window.location, DOMParser: dom.window.DOMParser, AbortController, setTimeout, clearTimeout };
     const api = {
-        showSingleSelection: async () => choose,
+        showSingleSelection: async (...args) => { calls.selections.push(args); return Array.isArray(choose) ? choose.shift() : choose; },
         showAlert: async (...args) => { calls.alerts.push(args); return confirmed; },
         saveImportedCourses: async value => { if (saveThrows) throw new Error("模拟保存失败"); calls.courses.push(JSON.parse(value)); return saveResult; },
         saveCourseConfig: async value => { calls.configs.push(JSON.parse(value)); throw new Error("must not replace config"); },
-        savePresetTimeSlots: async () => { calls.times++; throw new Error("must not replace times"); }
+        savePresetTimeSlots: async value => { calls.times++; calls.slots.push(JSON.parse(value)); if (timeThrows) throw new Error("模拟作息保存失败"); return timeResult; }
     };
     env[oldBridge ? "AndroidBridgePromise" : "shiguangBridgePromise"] = api;
     env[oldBridge ? "AndroidBridge" : "shiguangBridge"] = { notifyTaskCompletion: () => calls.completed++ };
@@ -112,16 +112,18 @@ function environment({ choose = 0, confirmed = true, saveResult = true, saveThro
     return { env, calls };
 }
 
-test("end-to-end import uses same-origin cookies, clears week filter, and preserves times", async () => {
+test("end-to-end import uses same-origin cookies, clears week filter, and saves official slots", async () => {
     const { env, calls } = environment();
     const result = await runImportFlow(env);
     assert.equal(result.status, "imported");
     assert.equal(calls.courses[0].length, 1);
     assert.equal(result.calendar.semesterStartDate, "2026-08-31");
     assert.equal(calls.configs.length, 0);
-    assert.equal(calls.times, 0);
+    assert.equal(calls.times, 1);
+    assert.deepEqual(calls.slots[0], timeSlots("wq-other"));
     assert.equal(calls.completed, 1);
     assert.match(calls.alerts[0][1], /测试待排课/);
+    assert.match(calls.alerts[0][1], /10:00—10:45/);
     assert.equal(new URLSearchParams(calls.requests[1].options.body).get("zc"), "");
     assert.ok(calls.requests.every(r => r.options.credentials === "same-origin"));
 });
@@ -129,15 +131,16 @@ test("end-to-end import uses same-origin cookies, clears week filter, and preser
 test("legacy Android bridge is supported", async () => {
     const { env, calls } = environment({ oldBridge: true });
     assert.equal((await runImportFlow(env)).status, "imported");
-    assert.equal(calls.times, 0);
+    assert.equal(calls.times, 1);
 });
 
 test("cancel selection or confirmation never saves anything", async () => {
-    for (const options of [{ choose: null }, { choose: -1 }, { confirmed: false }]) {
+    for (const options of [{ choose: null }, { choose: -1 }, { choose: [0, null] }, { choose: [0, 0, null] }, { confirmed: false }]) {
         const { env, calls } = environment(options);
         assert.equal((await runImportFlow(env)).status, "cancelled");
         assert.equal(calls.courses.length, 0);
         assert.equal(calls.configs.length, 0);
+        assert.equal(calls.times, 0);
         assert.equal(calls.completed, 0);
     }
 });
@@ -147,6 +150,7 @@ test("save failures never announce success or save config", async () => {
         const { env, calls } = environment(options);
         await assert.rejects(runImportFlow(env), /保存/);
         assert.equal(calls.configs.length, 0);
+        assert.equal(calls.times, 0);
         assert.equal(calls.completed, 0);
         assert.ok(!calls.alerts.some(a => a[0] === "导入完成"));
     }
@@ -210,5 +214,113 @@ test("browser script entrypoint invokes the new bridge without CommonJS globals"
     assert.equal(calls.completed, 1);
     assert.equal(calls.courses[0].length, 1);
     assert.equal(calls.configs.length, 0);
+    assert.equal(calls.times, 1);
+});
+
+test("all five official timetables contain ten ordered 45-minute sections", () => {
+    const expectedMorning = {
+        "wq-other": ["10:00-10:45", "10:50-11:35", "12:00-12:45", "12:50-13:35"],
+        "wq-2": ["10:00-10:45", "10:50-11:35", "11:50-12:35", "12:40-13:25"],
+        "wq-3": ["10:00-10:45", "10:50-11:35", "12:10-12:55", "13:00-13:45"],
+        "kl-wenshi": ["10:00-10:45", "10:55-11:40", "12:00-12:45", "12:55-13:40"],
+        "kl-other": ["10:00-10:45", "10:55-11:40", "12:10-12:55", "13:05-13:50"]
+    };
+    const afternoon = ["15:30-16:15", "16:25-17:10", "17:30-18:15", "18:25-19:10", "20:00-20:45", "20:55-21:40"];
+    const minutes = value => Number(value.slice(0, 2)) * 60 + Number(value.slice(3));
+    for (const [id, morning] of Object.entries(expectedMorning)) {
+        const slots = timeSlots(id);
+        assert.deepEqual(slots.map(s => s.startTime + "-" + s.endTime), [...morning, ...afternoon]);
+        slots.forEach((slot, i) => {
+            assert.equal(slot.number, i + 1);
+            assert.equal(minutes(slot.endTime) - minutes(slot.startTime), 45);
+            if (i) assert.ok(minutes(slot.startTime) >= minutes(slots[i - 1].endTime));
+        });
+    }
+});
+
+test("user can preserve an existing timetable without saving times or config", async () => {
+    const { env, calls } = environment({ choose: [0, 5] });
+    assert.equal((await runImportFlow(env)).status, "imported");
     assert.equal(calls.times, 0);
+    assert.equal(calls.configs.length, 0);
+    assert.match(calls.alerts[0][1], /保留目标课表已有作息/);
+    assert.equal(calls.courses[0][0].isCustomTime, undefined);
+});
+
+function timingApi(choices) {
+    const questions = [];
+    return { questions, savePresetTimeSlots() {}, async showSingleSelection(...args) {
+        questions.push(args);
+        assert.ok(choices.length, "unexpected location prompt");
+        return choices.shift();
+    } };
+}
+const timingCourse = (position, startSection = 3, endSection = 4) => ({ name: "测试课程", position, startSection, endSection, day: 1, teacher: "测试教师", weeks: [1, 3, 5] });
+
+test("mixed campus and building schedules use precise overrides without losing sections or weeks", async () => {
+    const api = timingApi([0]);
+    const courses = [timingCourse("温泉校区2号教学楼101"), timingCourse("温泉校区3号教学楼202"), timingCourse("昆仑校区文史楼303"), timingCourse("温泉校区1号教学楼404")];
+    const before = JSON.stringify(courses);
+    const timing = await prepareTiming(api, courses, semester);
+    assert.equal(api.questions.length, 1);
+    assert.deepEqual(timing.courses.map(c => [c.customStartTime, c.customEndTime]), [["11:50", "13:25"], ["12:10", "13:45"], ["12:00", "13:40"], [undefined, undefined]]);
+    assert.equal(timing.courses[0].isCustomTime, true);
+    assert.equal(timing.courses[0].startSection, 3);
+    assert.equal(timing.courses[0].endSection, 4);
+    assert.deepEqual(timing.courses[0].weeks, [1, 3, 5]);
+    assert.equal(JSON.stringify(courses), before);
+    assert.match(timing.description, /3 条错峰安排/);
+});
+
+test("unknown aliases are confirmed once per building and afternoon classes need no extra prompt", async () => {
+    const api = timingApi([0, 2]);
+    const timing = await prepareTiming(api, [timingCourse("测试楼101"), timingCourse("测试楼202", 1, 3), timingCourse("测试操场", 5, 6)], semester);
+    assert.equal(api.questions.length, 2);
+    assert.match(api.questions[1][0], /测试楼/);
+    assert.deepEqual(timing.courses.map(c => c.customEndTime), ["13:45", "12:55", undefined]);
+    assert.match(timing.description, /测试楼 → 温泉：3号教学楼/);
+});
+
+test("ambiguous numbered buildings and unknown classrooms are not silently guessed", async () => {
+    const api = timingApi([4, 1, 4]);
+    const timing = await prepareTiming(api, [timingCourse("2号教学楼101"), timingCourse("")], semester);
+    assert.equal(api.questions.length, 3);
+    assert.match(api.questions[1][0], /2号教学楼/);
+    assert.match(api.questions[2][0], /未注明教室/);
+    assert.equal(timing.courses[0].customStartTime, "11:50");
+    assert.equal(timing.courses[1].isCustomTime, undefined);
+});
+
+test("historical semesters and unsupported sections keep times without inventing slots", async () => {
+    for (const [term, courses, warning] of [
+        ["2024-2025-1", [timingCourse("测试楼")], /早于/],
+        ["2023-2024-2", [timingCourse("测试楼")], /早于/],
+        [semester, [timingCourse("测试楼", 11, 12)], /未公布/]
+    ]) {
+        const api = timingApi([]);
+        const timing = await prepareTiming(api, courses, term);
+        assert.equal(timing.slots, null);
+        assert.deepEqual(timing.courses, courses);
+        assert.match(timing.description, warning);
+    }
+    assert.equal((await prepareTiming(timingApi([0]), [timingCourse("温泉校区1号教学楼101")], "2024-2025-2")).slots.length, 10);
+});
+
+test("time save failures disclose partial success and never announce completion", async () => {
+    for (const options of [{ timeResult: false }, { timeThrows: true }]) {
+        const { env, calls } = environment(options);
+        await assert.rejects(runImportFlow(env), /课程已保存，但学校作息未能写入/);
+        assert.equal(calls.courses.length, 1);
+        assert.equal(calls.times, 1);
+        assert.equal(calls.configs.length, 0);
+        assert.equal(calls.completed, 0);
+        assert.ok(!calls.alerts.some(a => a[0] === "导入完成"));
+    }
+});
+
+test("missing time bridge fails before saving any course", async () => {
+    const { env, calls } = environment();
+    delete env.shiguangBridgePromise.savePresetTimeSlots;
+    await assert.rejects(runImportFlow(env), /不支持导入作息/);
+    assert.equal(calls.courses.length, 0);
 });
