@@ -201,6 +201,13 @@
         return name.replace(/\s+/g, " ").trim();
     }
 
+    function courseField(block, selector, name, label) {
+        const values = new Set();
+        for (const field of block.querySelectorAll(selector)) values.add(text(field));
+        if (values.size > 1) throw new Error("课程“" + name + "”包含多组" + label + "，无法确认与上课时间的对应关系，已停止导入。");
+        return values.values().next().value || "";
+    }
+
     function unscheduledCourses(doc) {
         const table = doc.getElementById("dataTables");
         if (!table) return [];
@@ -288,13 +295,16 @@
                             if (/(?:尚未排课|未排课|待排课|未安排时间|时间待定)/.test(text(block).slice(name.length))) { unscheduled.add(name); continue; }
                             throw new Error("课程“" + name + "”缺少排课信息，已停止导入，请检查学期理论课表。");
                         }
-                        const teacher = text(block.querySelector('font[title="教师"], font[title="老师"]'));
-                        const position = text(block.querySelector('font[title="教室"]'));
+                        let metadata;
                         for (const field of weekFields) {
                             const weekInfo = text(field);
                             if (/^(?:未排课|尚未排课|待排课|未安排|待定|时间待定|暂无安排)$/.test(weekInfo)) { unscheduled.add(name); continue; }
+                            if (!metadata) metadata = {
+                                teacher: courseField(block, 'font[title="教师"], font[title="老师"]', name, "教师信息"),
+                                position: courseField(block, 'font[title="教室"]', name, "教室信息")
+                            };
                             for (const schedule of parseSchedule(weekInfo)) {
-                                for (const range of schedule.ranges) courses.push({ name, teacher, position, day: days[column], ...range, weeks: schedule.weeks });
+                                for (const range of schedule.ranges) courses.push({ name, ...metadata, day: days[column], ...range, weeks: schedule.weeks });
                             }
                         }
                     }
