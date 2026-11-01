@@ -150,8 +150,8 @@
         let cursor = 0;
         for (const match of normalized.matchAll(/\[([^\[\]]+?)节\]/g)) {
             const weekPart = normalized.slice(cursor, match.index).replace(/^[,;、\s]+/, "");
-            const weekExpression = weekPart.replace(/[()单双周第\s]/g, "");
-            if (weekPart.includes("单") && weekPart.includes("双")) throw new Error("无法识别单双周：" + value);
+            const weekExpression = weekPart.replace(/[()全单双周第\s]/g, "");
+            if ((weekPart.includes("单") && weekPart.includes("双")) || (weekPart.includes("全") && /[单双]/.test(weekPart))) throw new Error("无法识别周次限定：" + value);
             const weeks = [];
             for (const week of numberList(weekExpression, 60)) {
                 if (weekPart.includes("单") && week % 2 !== 1) continue;
