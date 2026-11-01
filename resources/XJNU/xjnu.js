@@ -49,7 +49,14 @@
 
     function exactTimeProfile(position) {
         const value = buildingKey(position);
-        // 仅识别官方表中明确的名称；不凭楼号或楼名猜测校区、别名。
+        // 官方楼名与校区：https://jwc.xjnu.edu.cn/info/1682/14003.htm
+        // 文育楼：https://db.xjnu.edu.cn/info/1191/1992.htm
+        // 行知、行远楼：https://www.xjnu.edu.cn/info/1081/71732.htm
+        const wenquanName = value.replace(/^温泉(?:校区)?[：:（(]?/, "");
+        if (wenquanName === "齐学楼") return "wq-2";
+        if (wenquanName === "治学楼") return "wq-3";
+        if (/^(?:正学楼|笃学楼|文育楼|行知楼|行远楼)$/.test(wenquanName)) return "wq-other";
+        // 无校区的楼号仍不能确定作息；明确标注其他校区的同名楼宇也不套用温泉映射。
         if (/^温泉(?:校区)?[（(]?2号教学楼$/.test(value)) return "wq-2";
         if (/^温泉(?:校区)?[（(]?3号教学楼$/.test(value)) return "wq-3";
         if (/^温泉(?:校区)?[（(]?1号教学楼$/.test(value)) return "wq-other";
@@ -150,7 +157,8 @@
         let cursor = 0;
         for (const match of normalized.matchAll(/\[([^\[\]]+?)节\]/g)) {
             const weekPart = normalized.slice(cursor, match.index).replace(/^[,;、\s]+/, "");
-            const weekExpression = weekPart.replace(/[()全单双周第\s]/g, "");
+            // 教务周次列表可在末尾的单双全周标记前多一个逗号；仅去掉这一个，仍校验空项。
+            const weekExpression = weekPart.replace(/,(?=\([全单双]周?\)\s*$)/, "").replace(/[()全单双周第\s]/g, "");
             if ((weekPart.includes("单") && weekPart.includes("双")) || (weekPart.includes("全") && /[单双]/.test(weekPart))) throw new Error("无法识别周次限定：" + value);
             const weeks = [];
             for (const week of numberList(weekExpression, 60)) {
@@ -194,9 +202,21 @@
 
     function courseName(block) {
         let name = "";
-        for (const node of block.childNodes) {
-            if (node.nodeName === "BR") break;
+        let node = block.firstChild;
+        for (; node && node.nodeName !== "BR"; node = node.nextSibling) {
             name += node.textContent || "";
+        }
+        // 课程模块、教学班可另起一行；只追加紧随标题的纯文本括号行，遇到元数据或普通文字即止。
+        while (node?.nodeName === "BR") {
+            let line = "", next = node.nextSibling;
+            while (next?.nodeType === 3) {
+                line += next.textContent || "";
+                next = next.nextSibling;
+            }
+            line = line.trim();
+            if ((next && next.nodeName !== "BR") || !/^(?:\([^()]+\)|（[^（）]+）)$/.test(line)) break;
+            name += line;
+            node = next;
         }
         return name.replace(/\s+/g, " ").trim();
     }
