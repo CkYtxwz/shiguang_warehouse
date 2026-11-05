@@ -40,6 +40,7 @@ function mergeAndDistinctCourses(courses) {
         name: c.name || '',
         teacher: c.teacher || '',
         position: c.position || '',
+        building: c.building || '',
         weeks: Array.isArray(c.weeks) ? [...c.weeks].sort((a, b) => a - b) : []
     }));
 
@@ -48,6 +49,7 @@ function mergeAndDistinctCourses(courses) {
         return a.name.localeCompare(b.name) ||
                a.teacher.localeCompare(b.teacher) ||
                a.position.localeCompare(b.position) ||
+               a.building.localeCompare(b.building) ||
                (a.day || 0) - (b.day || 0) ||
                a.weeks.join(',').localeCompare(b.weeks.join(',')) ||
                (a.startSection || 0) - (b.startSection || 0);
@@ -63,6 +65,7 @@ function mergeAndDistinctCourses(courses) {
             current.name === next.name &&
             current.teacher === next.teacher &&
             current.position === next.position &&
+            current.building === next.building &&
             current.day === next.day &&
             current.weeks.join(',') === next.weeks.join(',');
 
@@ -85,6 +88,7 @@ function mergeAndDistinctCourses(courses) {
         return a.name.localeCompare(b.name) ||
                a.teacher.localeCompare(b.teacher) ||
                a.position.localeCompare(b.position) ||
+               a.building.localeCompare(b.building) ||
                (a.day || 0) - (b.day || 0) ||
                (a.startSection || 0) - (b.startSection || 0) ||
                (a.endSection || 0) - (b.endSection || 0);
@@ -100,6 +104,7 @@ function mergeAndDistinctCourses(courses) {
             cur.name === nxt.name &&
             cur.teacher === nxt.teacher &&
             cur.position === nxt.position &&
+            cur.building === nxt.building &&
             cur.day === nxt.day &&
             cur.startSection === nxt.startSection &&
             cur.endSection === nxt.endSection;
@@ -165,6 +170,7 @@ function parseTimetableToModel(doc) {
                     const teacher = teacherRaw.replace("任课教师:", "").trim();
                     const weekStr = tempDiv.querySelector('font[title="周次(节次)"]')?.innerText || "";
                     const position = tempDiv.querySelector('font[title="教室"]')?.innerText || "";
+                    const building = (tempDiv.querySelector('font[title="教学楼"]')?.textContent || "").trim().replace(/^【|】$/g, "").trim();
 
                     let startSection = 0, endSection = 0;
                     if (weekStr) {
@@ -187,6 +193,7 @@ function parseTimetableToModel(doc) {
                             "teacher": teacher,
                             "weeks": parseWeeks(weekStr),
                             "position": position,
+                            "building": building,
                             "day": day,
                             "startSection": startSection,
                             "endSection": endSection
@@ -330,12 +337,46 @@ async function saveAppConfig(semesterStartDate, totalWeeks) {
 /**
  * 新疆师范大学作息（2025年春季起）：https://www.xjnu.edu.cn/info/1080/38891.htm
  */
-async function saveAppTimeSlots() {
-    const selectedIndex = await window.shiguangBridgePromise.showSingleSelection(
-        "选择一套作息（2025年春季起；跨楼宇需自行核对，取消则保留现有作息）",
-        JSON.stringify(["温泉：1号教学楼及其他楼宇", "温泉：2号教学楼", "温泉：3号教学楼", "昆仑：文史楼", "昆仑：其他楼宇"]), 0
-    );
-    if (selectedIndex === null) return;
+async function prepareTimeSlots(courses, semesterId) {
+    if (semesterId < "2024-2025-2" || courses.some(course => course.endSection > 10)) {
+        const confirmed = await window.shiguangBridgePromise.showAlert(
+            "保留现有作息", "所选课表早于2025年春季，或包含第11节及以后课程，不适用当前作息表。本次保留已有作息，请导入后核对课程时间。", "继续导入"
+        );
+        return confirmed ? [] : null;
+    }
+
+    const campusNames = ["温泉校区", "昆仑校区"];
+    let directories;
+    try {
+        directories = await Promise.all(["002", "001"].map(async campusId => {
+            const response = await fetch(`${BASE_URL}/jsxsd/kbcx/getJxlByAjax`, {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body: `xqid=${campusId}`,
+                credentials: "include"
+            });
+            if (!response.ok) throw new Error("未获取到教学楼目录");
+            const buildings = (await response.json()).map(building => building.dmmc.trim()).filter(Boolean);
+            if (!buildings.length) throw new Error("教学楼目录为空");
+            return buildings;
+        }));
+    } catch (error) {
+        // 目录不可用时交由用户选择校区，不影响原课表读取。
+        directories = [[], []];
+    }
+    const courseCampuses = courses.map(course => directories
+        .map((buildings, index) => buildings.some(building => building === course.building ||
+            (!course.building && course.position.startsWith(building))) ? index : -1)
+        .filter(index => index !== -1));
+    const matchedCampuses = [...new Set(courseCampuses.flat())];
+    const campusIndex = matchedCampuses.length === 1 ? matchedCampuses[0] :
+        await window.shiguangBridgePromise.showSingleSelection(
+            matchedCampuses.length > 1 ? "课程涉及两校区，请选择课表基准校区" : "无法自动确定校区，请选择上课校区",
+            JSON.stringify(campusNames), 0
+        );
+    if (campusIndex === null) return null;
+
+    // 依次为温泉基准、温泉2号、温泉3号、昆仑文史楼、昆仑基准的第2至4节。
     const morningTimes = [
         ["10:50-11:35", "12:00-12:45", "12:50-13:35"],
         ["10:50-11:35", "11:50-12:35", "12:40-13:25"],
@@ -355,13 +396,52 @@ async function saveAppTimeSlots() {
         { "number": 9,  "startTime": "20:00", "endTime": "20:45" },
         { "number": 10, "startTime": "20:55", "endTime": "21:40" }
     ];
-    morningTimes[selectedIndex].forEach((time, index) => {
+    morningTimes[campusIndex === 0 ? 0 : 4].forEach((time, index) => {
         const [startTime, endTime] = time.split("-");
         unifiedSlots[index + 1].startTime = startTime;
         unifiedSlots[index + 1].endTime = endTime;
     });
 
-    return await window.shiguangBridgePromise.savePresetTimeSlots(JSON.stringify(unifiedSlots));
+    // 此时课程已完成合并；只将起止时间偏离基准的课程改为自定义时间。
+    const unconfirmed = [];
+    courses.forEach((course, index) => {
+        const identified = courseCampuses[index].length === 1;
+        const campus = identified ? courseCampuses[index][0] : campusIndex;
+        const building = course.building || course.position;
+        const baseProfile = campus === 0 ? 0 : 4;
+        let profile = baseProfile;
+        if (campus === 0 && /(^|\D)2号教学楼/.test(building)) profile = 1;
+        else if (campus === 0 && /(^|\D)3号教学楼/.test(building)) profile = 2;
+        else if (campus === 1 && building.includes("文史楼")) profile = 3;
+
+        if (!identified && profile === baseProfile &&
+            [course.startSection, course.endSection].some(section => section >= 2 && section <= 4)) {
+            unconfirmed.push(`${course.name}（星期${"一二三四五六日"[course.day - 1]}，第${course.startSection}-${course.endSection}节）`);
+        }
+
+        let startTime = unifiedSlots[course.startSection - 1].startTime;
+        let endTime = unifiedSlots[course.endSection - 1].endTime;
+        if (course.startSection >= 2 && course.startSection <= 4) {
+            startTime = morningTimes[profile][course.startSection - 2].split("-")[0];
+        }
+        if (course.endSection >= 2 && course.endSection <= 4) {
+            endTime = morningTimes[profile][course.endSection - 2].split("-")[1];
+        }
+        if (startTime !== unifiedSlots[course.startSection - 1].startTime ||
+            endTime !== unifiedSlots[course.endSection - 1].endTime) {
+            course.isCustomTime = true;
+            course.customStartTime = startTime;
+            course.customEndTime = endTime;
+        }
+    });
+    if (unconfirmed.length && !await window.shiguangBridgePromise.showAlert(
+        "请核对课程时间", `${unconfirmed.length}条排课未能确认校区或教学楼，暂按${campusNames[campusIndex]}基准时间安排。请在导入后核对实际时间：\n${unconfirmed.join("\n")}`, "继续导入"
+    )) return null;
+    return unifiedSlots;
+}
+
+async function saveAppTimeSlots(timeSlots) {
+    return await window.shiguangBridgePromise.savePresetTimeSlots(JSON.stringify(timeSlots));
 }
 
 // 流程编排
@@ -402,12 +482,17 @@ async function runImportFlow() {
             return;
         }
 
-        // 6. 保存配置（含开学日期 + 最大周次）/ 作息 / 课程
-        await saveAppConfig(semesterStartDate, totalWeeks);
-        await saveAppTimeSlots();
-        await window.shiguangBridgePromise.saveImportedCourses(JSON.stringify(finalCourses));
+        // 6. 确定校区及楼宇时间，所有选择和提示均在保存前完成。
+        const timeSlots = await prepareTimeSlots(finalCourses, semesterId);
+        if (timeSlots === null) return;
 
-        // 7. 完成
+        // 7. 保存配置（含开学日期 + 最大周次）/ 作息 / 课程
+        await saveAppConfig(semesterStartDate, totalWeeks);
+        if (timeSlots.length) await saveAppTimeSlots(timeSlots);
+        const importedCourses = finalCourses.map(({ building, ...course }) => course);
+        await window.shiguangBridgePromise.saveImportedCourses(JSON.stringify(importedCourses));
+
+        // 8. 完成
         window.shiguangBridge.showToast(`成功导入 ${finalCourses.length} 门课程`);
         window.shiguangBridge.notifyTaskCompletion();
     } catch (error) {
